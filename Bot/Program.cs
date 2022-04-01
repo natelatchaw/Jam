@@ -10,6 +10,7 @@ namespace Bot
 
         public static IHostBuilder CreateHostBuilder(String[] args) =>
             Host.CreateDefaultBuilder(args)
-                .UseStartup<Startup>();
+                .UseStartup<Startup>()
+                .UseWindowsService();
     }
 }
