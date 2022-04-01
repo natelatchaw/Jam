@@ -6,9 +6,9 @@ namespace Bot
     public class Program
     {
         public static void Main(String[] args) =>
-            CreateWebHostBuilder(args).Build().Run();
+            CreateHostBuilder(args).Build().Run();
 
-        public static IHostBuilder CreateWebHostBuilder(String[] args) =>
+        public static IHostBuilder CreateHostBuilder(String[] args) =>
             Host.CreateDefaultBuilder(args)
                 .UseStartup<Startup>();
     }
