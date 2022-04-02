@@ -20,26 +20,24 @@ namespace Bot.Modules
         private readonly FFmpegService _ffmpegService;
 
         private IAudioClient? Client { get; set; }
-        private Queue<Tuple<IVoiceChannel, String>> Queue { get; set; }
 
         public AudioModule(
             ILogger<AudioModule> logger,
             YouTubeDLService youtubeService,
-            FFmpegService ffmpegService,
-            Queue<Tuple<IVoiceChannel, String>> queue
+            FFmpegService ffmpegService
         ) : base()
         {
             _logger = logger;
             _youtubeService = youtubeService;
             _ffmpegService = ffmpegService;
-
-            Queue = queue;
         }
 
         [Command("play", RunMode = RunMode.Async)]
         [Summary("Searches for and plays a song.")]
         public Task Play([Remainder] String query) => Task.Run(async () =>
         {
+            Boolean verbose = true;
+
             try
             {
                 // Get the current user
@@ -75,7 +73,19 @@ namespace Bot.Modules
                     return;
                 }
 
-                await Execute(query);
+                IUserMessage? updateMessage = default;
+                if (verbose) updateMessage = await Context.Channel.SendMessageAsync("Starting download...");
+                await Execute(query, updateMessage);
+            }
+            catch (YouTubeDLServiceException exception)
+            {
+                _logger.LogError(exception, "{message}", exception.Message);
+                await Context.Channel.SendMessageAsync("An issue occurred during audio download. Check the logs for details.");
+            }
+            catch (FFmpegServiceException exception)
+            {
+                _logger.LogError(exception, "{message}", exception.Message);
+                await Context.Channel.SendMessageAsync($"An issue occurred during FFmpeg multiplexing. Check the logs for details.");
             }
             catch (Exception exception)
             {
@@ -88,7 +98,7 @@ namespace Bot.Modules
             }
         });
 
-        private async Task Execute(String query)
+        private async Task Execute(String query, IUserMessage? message)
         {
             await Task.Run(async () =>
             {
@@ -96,17 +106,30 @@ namespace Bot.Modules
                 {
                     if (Client is not IAudioClient client) return;
 
-                    _logger.LogDebug("Spawning YouTube-DL process...");
-                    Process youtubeDL = await _youtubeService.StartProcessAsync(GetYoutubeDLOptions(query));
+                    //
+                    if (message is not null) await message.ModifyAsync((MessageProperties properties) => properties.Content = "Initializing streaming service...");
+
+                    _logger.LogTrace("Spawning YouTube-DL process...");
+                    List<StringValues> youtubeDLOptions = GetYoutubeDLOptions(query);
+                    ProcessStartInfo youtubeDLInfo = _youtubeService.GetStartInfo(youtubeDLOptions);
+                    Process youtubeDL = _youtubeService.Execute(youtubeDLInfo);
                     _logger.LogDebug("{filename} {arguments}", youtubeDL.StartInfo.FileName, youtubeDL.StartInfo.Arguments);
 
-                    _logger.LogDebug("Spawning FFmpeg process...");
-                    Process ffmpeg = await _ffmpegService.StartProcessAsync(GetFFmpegOptions());
-                    _logger.LogDebug("{filename} {arguments}", ffmpeg.StartInfo.FileName, ffmpeg.StartInfo.Arguments);
+                    _logger.LogTrace("Spawning FFmpeg process...");
+                    List<StringValues> ffmpegOptions = GetFFmpegOptions();
+                    ProcessStartInfo ffmpegInfo = _ffmpegService.GetStartInfo(ffmpegOptions);
+                    Process ffmpeg = _ffmpegService.Execute(ffmpegInfo);
+                    _logger.LogDebug("{directory}> {filename} {arguments}", ffmpegInfo.WorkingDirectory, ffmpeg.StartInfo.FileName, ffmpeg.StartInfo.Arguments);
+
+                    //
+                    if (message is not null) await message.ModifyAsync((MessageProperties properties) => properties.Content = "Beginning download...");
 
                     _logger.LogDebug("Piping youtube-dl output to ffmpeg...");
                     using Stream audio = await youtubeDL.PipeAsync(ffmpeg);
                     _logger.LogDebug("Received {length} bytes from ffmpeg.", audio.Length);
+
+                    //
+                    if (message is not null) await message.ModifyAsync((MessageProperties properties) => properties.Content = "Preparing stream...");
 
                     _logger.LogDebug("Creating PCM Stream...");
                     using AudioOutStream output = client.CreatePCMStream(AudioApplication.Mixed);
@@ -116,9 +139,15 @@ namespace Bot.Modules
                     Int64 position = audio.Seek(0, SeekOrigin.Begin);
                     _logger.LogDebug("Audio stream rewound to position {position}", position);
 
+                    //
+                    if (message is not null) await message.ModifyAsync((MessageProperties properties) => properties.Content = "Streaming to Discord...");
+
                     _logger.LogDebug("Copying {length} bytes from audio stream to PCM stream...", audio.Length);
                     await audio.CopyToAsync(output);
                     _logger.LogDebug("Copied {length} bytes.", audio.Length);
+
+                    //
+                    if (message is not null) await message.DeleteAsync();
 
                     _logger.LogDebug("Flushing PCM stream to client...");
                     await output.FlushAsync();
