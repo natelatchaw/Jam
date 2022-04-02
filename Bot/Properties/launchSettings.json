@@ -1,8 +1,7 @@
 {
   "profiles": {
     "Bot": {
-      "commandName": "Project",
-      "commandLineArgs": "/Options:Token=NzAyNjE4MzYwOTkwNjYyNzU2.XqCqVw.teLB08WSl5xGu8xyL_NcfYmwMNA"
+      "commandName": "Project"
     }
   }
 }
