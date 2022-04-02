@@ -21,13 +21,17 @@ namespace Bot
     {
         private readonly ILogger<CommandHandler> _logger;
         private readonly IConfiguration _configuration;
+        private readonly IServiceProvider _serviceProvider;
+
+
+        
         private readonly IOptions<CommandHandler.Options> _handlerOptions;
         private readonly IOptions<DiscordService.Options> _serviceOptions;
         private readonly DiscordSocketClient _client;
         private readonly CommandService _commandService;
+        
         private readonly IRateLimiter<UInt64> _rateLimiter;
 
-        public IServiceProvider? ServiceProvider { get; set; }
         public static Version Version => new(0, 0, 1);
 
         public CommandHandler.Options HandlerOptions => _handlerOptions.Value;
@@ -40,11 +44,14 @@ namespace Bot
             IOptions<DiscordService.Options> serviceOptions,
             DiscordSocketClient client,
             CommandService commandService,
-            IRateLimiter<UInt64> rateLimiter
+            IRateLimiter<UInt64> rateLimiter,
+            IServiceProvider serviceProvider
         )
         {
             _logger = logger;
             _configuration = configuration;
+            _serviceProvider = serviceProvider;
+
             _handlerOptions = handlerOptions;
             _serviceOptions = serviceOptions;
             _client = client;
@@ -56,18 +63,7 @@ namespace Bot
         {
             _logger.LogInformation("{service} v{version}", nameof(CommandHandler), Version);
 
-            Assembly assembly = Assembly.GetExecutingAssembly();
-
-            ServiceProvider = new ServiceCollection()
-                .AddLogging((ILoggingBuilder builder) => builder.AddDebug())
-                .AddFFmpegService(_configuration.GetSection("ffmpeg"))
-                .AddYouTubeDLService(_configuration.GetSection("youtube-dl"))
-                .AddSingleton<DiscordSocketClient>()
-                .AddSingleton<CommandService>()
-                .AddSingleton<Queue<Tuple<IVoiceChannel, String>>>()
-                .BuildServiceProvider();
-
-            await _commandService.AddModulesAsync(assembly, ServiceProvider);
+            await _commandService.AddModulesAsync(Assembly.GetExecutingAssembly(), _serviceProvider);
 
             _client.MessageReceived += OnMessage;
         }
@@ -94,7 +90,7 @@ namespace Bot
                 // Create a command context from the message
                 SocketCommandContext context = new(_client, message);
                 // Execute the command
-                await _commandService.ExecuteAsync(context, position, ServiceProvider);
+                await _commandService.ExecuteAsync(context, position, _serviceProvider);
             }
             catch (CommandValidationException exception)
             {

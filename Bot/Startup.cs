@@ -1,4 +1,5 @@
 ﻿using Discord.Commands;
+using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -19,12 +20,18 @@ namespace Bot
             services.AddDiscordService(_configuration.GetSection("Options"));
             services.AddCommandHandler(_configuration.GetSection("CommandHandler"));
             services.AddRateLimiter(_configuration.GetSection("RateLimiter"));
+
+            services.AddFFmpegService(_configuration.GetSection("ffmpeg"));
+            services.AddYouTubeDLService(_configuration.GetSection("youtube-dl"));
+
+            services.AddSingleton<DiscordSocketClient>();
             services.AddSingleton<CommandService>();
 
             services.AddLogging((ILoggingBuilder builder) =>
             {
-                builder.ClearProviders();
-                builder.AddConsole();
+                builder
+                    .ClearProviders()
+                    .AddConsole();
             });
         }
     }
