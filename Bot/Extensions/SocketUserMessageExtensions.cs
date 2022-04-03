@@ -1,4 +1,4 @@
-﻿using Bot;
+﻿using Bot.Services;
 using Discord.Commands;
 using Microsoft.Extensions.Options;
 using System;

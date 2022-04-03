@@ -41,16 +41,16 @@ namespace Microsoft.Extensions.Hosting
                 if (constructor != null)
                 {
                     // Create an instance of StartupType
-                    Object instance = (TStartup)Activator.CreateInstance(typeof(TStartup), context.Configuration);
+                    TStartup? instance = (TStartup?)Activator.CreateInstance(typeof(TStartup), context.Configuration);
                     // Invoke StartupType.ConfigureServices
-                    Object result = configureServices?.Invoke(instance, parameters);
+                    Object? result = configureServices?.Invoke(instance, parameters);
                 }
                 else
                 {
                     // Create an instance of StartupType
-                    Object instance = (TStartup)Activator.CreateInstance(typeof(TStartup), null);
+                    TStartup? instance = (TStartup?)Activator.CreateInstance(typeof(TStartup), null);
                     // Invoke StartupType.ConfigureServices
-                    Object result = configureServices?.Invoke(instance, parameters);
+                    Object? result = configureServices?.Invoke(instance, parameters);
                 }
             });
         }

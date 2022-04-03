@@ -1,30 +1,24 @@
-﻿using Bot;
-using Bot.Interfaces;
+﻿using Bot.Interfaces;
 using Bot.Services;
-using Discord;
 using Discord.Commands;
 using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System;
-using System.Collections.Generic;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Bot
+namespace Bot.Services
 {
     public partial class CommandHandler : BackgroundService
     {
         private readonly ILogger<CommandHandler> _logger;
         private readonly IConfiguration _configuration;
         private readonly IServiceProvider _serviceProvider;
-
-
-        
+                
         private readonly IOptions<CommandHandler.Options> _handlerOptions;
         private readonly IOptions<DiscordService.Options> _serviceOptions;
         private readonly DiscordSocketClient _client;
@@ -66,6 +60,17 @@ namespace Bot
             await _commandService.AddModulesAsync(Assembly.GetExecutingAssembly(), _serviceProvider);
 
             _client.MessageReceived += OnMessage;
+            _client.SlashCommandExecuted += OnSlashCommand;
+        }
+
+        private async Task OnSlashCommand(SocketSlashCommand arg)
+        {
+            if (arg is not SocketSlashCommand command)
+            {
+                throw new CommandValidationException($"Command is not a {nameof(SocketSlashCommand)}");
+            }
+
+            await command.DeferAsync();
         }
 
         private async Task OnMessage(SocketMessage arg)

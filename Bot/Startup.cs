@@ -1,4 +1,5 @@
-﻿using Discord.Commands;
+﻿using Bot.Services;
+using Discord.Commands;
 using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -21,8 +22,10 @@ namespace Bot
             services.AddCommandHandler(_configuration.GetSection("CommandHandler"));
             services.AddRateLimiter(_configuration.GetSection("RateLimiter"));
 
+            services.AddSingleton<AudioService>();
             services.AddFFmpegService(_configuration.GetSection("ffmpeg"));
             services.AddYouTubeDLService(_configuration.GetSection("youtube-dl"));
+            services.AddCredential(_configuration.GetSection("Credentials"));
 
             services.AddSingleton<DiscordSocketClient>();
             services.AddSingleton<CommandService>();

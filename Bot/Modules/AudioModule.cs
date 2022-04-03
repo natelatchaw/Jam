@@ -1,14 +1,18 @@
 ﻿using Bot.Extensions;
+using Bot.Models;
 using Bot.Services;
 using Discord;
 using Discord.Audio;
 using Discord.Commands;
+using Discord.Net;
+using Discord.WebSocket;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Threading.Tasks;
 
 namespace Bot.Modules
@@ -16,6 +20,7 @@ namespace Bot.Modules
     public partial class AudioModule : ModuleBase
     {
         private readonly ILogger<AudioModule> _logger;
+        private readonly AudioService _audioService;
         private readonly YouTubeDLService _youtubeService;
         private readonly FFmpegService _ffmpegService;
 
@@ -23,59 +28,59 @@ namespace Bot.Modules
 
         public AudioModule(
             ILogger<AudioModule> logger,
+            AudioService audioService,
             YouTubeDLService youtubeService,
             FFmpegService ffmpegService
         ) : base()
         {
             _logger = logger;
+            _audioService = audioService;
             _youtubeService = youtubeService;
             _ffmpegService = ffmpegService;
         }
 
         [Command("play", RunMode = RunMode.Async)]
-        [Summary("Searches for and plays a song.")]
         public Task Play([Remainder] String query) => Task.Run(async () =>
         {
-            Boolean verbose = true;
-
             try
             {
-                // Get the current user
-                if (Context.User is not IGuildUser user)
+                IVoiceChannel voiceChannel = Context.GetVoiceChannel();
+
+                if (await DownloadMetadataAsync(query) is Metadata metadata)
                 {
-                    IUserMessage message = await Context.Channel.SendMessageAsync("I have no idea who you are.", messageReference: Context.Message.Reference);
-                    await Task.Delay(DateTimeOffset.Now.AddSeconds(5) - DateTimeOffset.Now);
-                    await message.DeleteAsync();
-                    return;
+                    Int32 descriptionLength = 150;
+                    IUser author = Context.Message.Author;
+                    EmbedAuthorBuilder embedAuthorBuilder = author
+                        .AsEmbedAuthorBuilder();
+                    EmbedBuilder embedBuilder = metadata
+                        .AsEmbedBuilder(descriptionLength)
+                        .WithAuthor(author)
+                        .WithColor(Color.Red);
+                    await Context.Channel.SendMessageAsync(embed: embedBuilder.Build());
+
+                    if (Context.Client is DiscordSocketClient client)
+                        await client.SetActivityAsync(metadata.AsActivity(descriptionLength));
                 }
 
-                // Get the user's current voice channel
-                if (user.VoiceChannel is not IVoiceChannel voiceChannel)
+                _ = await _audioService.JoinAsync(voiceChannel);
+
+                try
                 {
-                    IUserMessage message = await Context.Channel.SendMessageAsync("Please join a voice channel first.", messageReference: Context.Message.Reference);
-                    await Task.Delay(DateTimeOffset.Now.AddSeconds(5) - DateTimeOffset.Now);
-                    await message.DeleteAsync();
-                    return;
+                    await Context.Message.DeleteAsync(new() { Timeout = 3 });
+                }
+                catch (HttpException exception)
+                {
+                    _logger.LogWarning("Failed to remove queue message. Are permissions enabled?");
+                    _logger.LogError(exception, "{message}", exception.Message);
                 }
 
-                // If the client is not initialized
-                if (Client is not IAudioClient client)
-                {
-                    // Connect and intialize the client
-                    Client = await voiceChannel.ConnectAsync();
-                }
-                // If the client is currently playing
-                else if (client.GetStreams().ContainsKey(voiceChannel.Id))
-                {
-                    IUserMessage message = await Context.Channel.SendMessageAsync("Queueing is not supported yet.", messageReference: Context.Message.Reference);
-                    await Task.Delay(DateTimeOffset.Now.AddSeconds(5) - DateTimeOffset.Now);
-                    await message.DeleteAsync();
-                    return;
-                }
-
-                IUserMessage? updateMessage = default;
-                if (verbose) updateMessage = await Context.Channel.SendMessageAsync("Starting download...");
-                await Execute(query, updateMessage);
+                Stream stream = await DownloadAudioAsync(query);
+                await Task.Run(async () => await _audioService.StreamAsync(voiceChannel, stream));
+            }
+            catch (CommandContextException exception)
+            {
+                _logger.LogError(exception, "{message}", exception.Message);
+                await Context.Channel.SendMessageAsync("Could not determine the voice channel to use.");
             }
             catch (YouTubeDLServiceException exception)
             {
@@ -90,96 +95,127 @@ namespace Bot.Modules
             catch (Exception exception)
             {
                 _logger.LogError(exception, "{message}", exception.Message);
-                await Context.Channel.SendMessageAsync(exception.Message, messageReference: Context.Message.Reference);
-            }
-            finally
-            {
-                await Context.Message.DeleteAsync(new() { Timeout = 3 });
+                await Context.Channel.SendMessageAsync($"An unhandled error occurred. Check the log for details.");
             }
         });
 
-        private async Task Execute(String query, IUserMessage? message)
+
+        [Command("play_enable_sc", RunMode = RunMode.Async)]
+        public Task Enable() => Task.Run(async () =>
         {
-            await Task.Run(async () =>
+            IGuild guild = Context.Guild;
+
+            SlashCommandBuilder builder = new();
+            if (typeof(AudioModule).GetMethod(nameof(Play)) is not MethodBase method) return;
+            if (method.GetCustomAttribute<CommandAttribute>() is not CommandAttribute attribute) return;
+            String name = attribute.Text.ToLower();
+            _logger.LogInformation(name);
+            String description = "Play audio";
+            builder.WithName(attribute.Text.ToLower());
+            builder.WithDescription(description);
+
+            SlashCommandOptionBuilder optionBuilder = new();
+            optionBuilder.WithType(ApplicationCommandOptionType.String);
+            optionBuilder.WithDescription("A search query");
+            optionBuilder.WithName("Query");
+            optionBuilder.WithRequired(true);
+            builder.AddOption(optionBuilder);
+
+            try
             {
-                try
-                {
-                    if (Client is not IAudioClient client) return;
+                await guild.CreateApplicationCommandAsync(builder.Build());
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, exception.Message);
+            }
+        });
+    }
 
-                    //
-                    if (message is not null) await message.ModifyAsync((MessageProperties properties) => properties.Content = "Initializing streaming service...");
+    public partial class AudioModule
+    {
+        private async Task<Metadata?> DownloadMetadataAsync(String query)
+        {
+            /// Spawn youtube-dl
+            _logger.LogTrace("Spawning YouTube-DL process...");
+            List<StringValues> youtubeDLMetadataOptions = GetMetadataArgs(query);
+            ProcessStartInfo youtubeDLMetadataInfo = _youtubeService.GetInfo(youtubeDLMetadataOptions);
+            Process youtubeDLMetadata = _youtubeService.Execute(youtubeDLMetadataInfo);
+            _logger.LogDebug("{filename} {arguments}", youtubeDLMetadata.StartInfo.FileName, youtubeDLMetadata.StartInfo.Arguments);
 
-                    _logger.LogTrace("Spawning YouTube-DL process...");
-                    List<StringValues> youtubeDLOptions = GetYoutubeDLOptions(query);
-                    ProcessStartInfo youtubeDLInfo = _youtubeService.GetStartInfo(youtubeDLOptions);
-                    Process youtubeDL = _youtubeService.Execute(youtubeDLInfo);
-                    _logger.LogDebug("{filename} {arguments}", youtubeDL.StartInfo.FileName, youtubeDL.StartInfo.Arguments);
+            /// Download metadata
+            _logger.LogDebug("Deserializing YouTube-DL metadata...");
+            Metadata? metadata = await youtubeDLMetadata.DeserializeAsync<Metadata>();
+            if (youtubeDLMetadata.HasExited is false) youtubeDLMetadata.Kill();
+            _logger.LogDebug("Metadata deserialization finished.");
 
-                    _logger.LogTrace("Spawning FFmpeg process...");
-                    List<StringValues> ffmpegOptions = GetFFmpegOptions();
-                    ProcessStartInfo ffmpegInfo = _ffmpegService.GetStartInfo(ffmpegOptions);
-                    Process ffmpeg = _ffmpegService.Execute(ffmpegInfo);
-                    _logger.LogDebug("{directory}> {filename} {arguments}", ffmpegInfo.WorkingDirectory, ffmpeg.StartInfo.FileName, ffmpeg.StartInfo.Arguments);
+            /// Return
+            return metadata;
+        }
 
-                    //
-                    if (message is not null) await message.ModifyAsync((MessageProperties properties) => properties.Content = "Beginning download...");
+        private async Task<Stream> DownloadAudioAsync(String query)
+        {
+            /// Spawn youtube-dl
+            _logger.LogTrace("Spawning YouTube-DL process...");
+            List<StringValues> youtubeDLOptions = GetDownloadArgs(query);
+            ProcessStartInfo youtubeDLInfo = _youtubeService.GetInfo(youtubeDLOptions);
+            Process youtubeDL = _youtubeService.Execute(youtubeDLInfo);
+            _logger.LogDebug("{filename} {arguments}", youtubeDL.StartInfo.FileName, youtubeDL.StartInfo.Arguments);
 
-                    _logger.LogDebug("Piping youtube-dl output to ffmpeg...");
-                    using Stream audio = await youtubeDL.PipeAsync(ffmpeg);
-                    _logger.LogDebug("Received {length} bytes from ffmpeg.", audio.Length);
+            /// Spawn ffmpeg
+            _logger.LogTrace("Spawning FFmpeg process...");
+            List<StringValues> ffmpegOptions = GetMultiplexArgs();
+            ProcessStartInfo ffmpegInfo = _ffmpegService.GetInfo(ffmpegOptions);
+            Process ffmpeg = _ffmpegService.Execute(ffmpegInfo);
+            _logger.LogDebug("{directory}> {filename} {arguments}", ffmpegInfo.WorkingDirectory, ffmpeg.StartInfo.FileName, ffmpeg.StartInfo.Arguments);
 
-                    //
-                    if (message is not null) await message.ModifyAsync((MessageProperties properties) => properties.Content = "Preparing stream...");
+            /// Pipe audio
+            _logger.LogDebug("Piping youtube-dl output to ffmpeg...");
+            Stream audio = await youtubeDL.PipeAsync(ffmpeg);
+            if (youtubeDL.HasExited is false) youtubeDL.Kill();
+            if (ffmpeg.HasExited is false) ffmpeg.Kill();
+            _logger.LogDebug("Received {length} bytes from ffmpeg.", audio.Length);
 
-                    _logger.LogDebug("Creating PCM Stream...");
-                    using AudioOutStream output = client.CreatePCMStream(AudioApplication.Mixed);
-                    _logger.LogDebug("Created PCM Stream.");
+            /// Rewind audio
+            audio.Seek(0, SeekOrigin.Begin);
 
-                    _logger.LogDebug("Rewinding audio stream from position {position}...", audio.Position);
-                    Int64 position = audio.Seek(0, SeekOrigin.Begin);
-                    _logger.LogDebug("Audio stream rewound to position {position}", position);
-
-                    //
-                    if (message is not null) await message.ModifyAsync((MessageProperties properties) => properties.Content = "Streaming to Discord...");
-
-                    _logger.LogDebug("Copying {length} bytes from audio stream to PCM stream...", audio.Length);
-                    await audio.CopyToAsync(output);
-                    _logger.LogDebug("Copied {length} bytes.", audio.Length);
-
-                    //
-                    if (message is not null) await message.DeleteAsync();
-
-                    _logger.LogDebug("Flushing PCM stream to client...");
-                    await output.FlushAsync();
-                    _logger.LogDebug("Flushed audio stream.");
-                }
-                catch (DllNotFoundException)
-                {
-                    throw;
-                }
-            });
+            /// Return
+            return audio;
         }
     }
 
     public partial class AudioModule
     {
-        private static List<StringValues> GetYoutubeDLOptions(String query) => new()
+        private static List<StringValues> GetMetadataArgs(String query) => new()
         {
-            new(new string[] { $"ytsearch:\"{query}\"" }),
-            new(new string[] { "--output", "-" }),
+            new(new[] { $"ytsearch:\"{query}\"" }),
+            new(new[] { "--dump-json" }),
+            new(new[] { "--output", "-" }),
         };
-        private static List<StringValues> GetFFmpegOptions() => new()
+
+        private static List<StringValues> GetDownloadArgs(String query) => new()
+        {
+            new(new[] { $"ytsearch:\"{query}\"" }),
+            new(new[] { "--output", "-" }),
+        };
+
+        private static List<StringValues> GetMultiplexArgs() => new()
         {
             // INPUT PARAMETERS
-            //new(new string[] { "-loglevel", "trace" }),
-            //new(new string[] { "-hide_banner" }),
-            new(new string[] { "-i", "pipe:0" }),
+            new(new[] { "-hide_banner" }),
+            new(new[] { "-loglevel verbose" }),
+            new(new[] { "-i", "pipe:0" }),
 
             // OUTPUT PARAMETERS
-            new(new string[] { "-ac", "2" }),
-            new(new string[] { "-f", "s16le" }),
-            new(new string[] { "-ar", "48000" }),
-            new(new string[] { "pipe:1" }),
+            new(new[] { "-ac", "2" }),
+            new(new[] { "-f", "s16le" }),
+            new(new[] { "-ar", "48000" }),
+            new(new[] { "pipe:1" }),
         };
+    }
+
+    public class AudioModuleException : Exception
+    {
+        public AudioModuleException(String? message, Exception? innerException = null) : base(message, innerException) { }
     }
 }

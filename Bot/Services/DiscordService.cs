@@ -1,4 +1,4 @@
-﻿using Bot;
+﻿using Bot.Services;
 using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -8,7 +8,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Bot
+namespace Bot.Services
 {
     public partial class DiscordService : BackgroundService
     {

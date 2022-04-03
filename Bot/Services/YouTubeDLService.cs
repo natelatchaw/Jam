@@ -1,8 +1,7 @@
 ﻿using Bot.Extensions;
-using Bot.Interfaces;
+using Bot.Models;
 using Bot.Services;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
@@ -10,32 +9,31 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace Bot.Services
 {
-    public partial class YouTubeDLService : IProcessService
+    public partial class YouTubeDLService : ProcessService
     {
         private readonly ILogger<YouTubeDLService> _logger;
         private readonly IOptions<Options> _options;
+        private readonly IOptions<Credential> _credential;
 
-        private readonly FileInfo _executable;
-
-        public Options YouTubeDLOptions => _options.Value;
 
         public YouTubeDLService(
             ILogger<YouTubeDLService> logger,
-            IOptions<Options> options
+            IOptions<Options> options,
+            IOptions<Credential> credential
         )
         {
             _logger = logger;
             _options = options;
+            _credential = credential;
         }
 
 
-        public String FileName
+        protected override String FileName
         {
             get
             {
@@ -46,20 +44,18 @@ namespace Bot.Services
             }
         }
 
-        public DirectoryInfo Directory
+        protected override String Path
         {
             get
             {
                 if (_options.Value.Path is not String path)
                     throw new YouTubeDLServiceException($"{nameof(_options.Value.FileName)} property in {nameof(YouTubeDLService)}.{nameof(Options)} was missing.");
-                else if (System.IO.Directory.Exists(path) is false)
-                    throw new YouTubeDLServiceException($"Directory '{path}' does not exist.");
                 else
-                    return new(path);
+                    return path;
             }
         }
 
-        public SearchOption SearchOption
+        protected override SearchOption SearchOption
         {
             get
             {
@@ -74,40 +70,44 @@ namespace Bot.Services
         }
 
 
-        public FileInfo GetFileInfo()
+        public override DirectoryInfo Directory
         {
-            IEnumerable<FileInfo> files = Directory.GetFiles(FileName, SearchOption);
-            try
+            get
             {
-                if (files.SingleOrDefault() is not FileInfo file)
+                try
                 {
-                    List<String> errorDetails = new()
-                    {
-                        $"Failed to locate {FileName}",
-                        $"Search Area: {Directory.FullName}",
-                        $"Search Mode: {Enum.GetName(typeof(SearchOption), SearchOption)}",
-                    };
-                    throw new YouTubeDLServiceException(String.Join('\n', errorDetails));
+                    DirectoryInfo directory = base.Directory;
+                    _logger.LogTrace("Located directory {directoryName}", directory.FullName);
+                    return directory;
                 }
-                _logger.LogTrace("{fileName} was located in {directoryName}", file.Name, file.DirectoryName);
-                return file;
-            }
-            catch (InvalidOperationException exception)
-            {
-                IEnumerable<String> candidates = files.Select((FileInfo match) => match.FullName);
-                List<String> errorDetails = new()
+                catch (ProcessServiceException exception)
                 {
-                    $"Multiple candidates found for {FileName}",
-                    $"Candidates:\n{String.Join('\n', candidates)}",
-                    $"Search Mode: {Enum.GetName(typeof(SearchOption), SearchOption)}",
-                };
-                throw new YouTubeDLServiceException(String.Join('\n', errorDetails), exception);
+                    throw new YouTubeDLServiceException(exception.Message, exception);
+                }
             }
         }
 
-        public ProcessStartInfo GetStartInfo(IEnumerable<StringValues> args)
+        public override FileInfo File
         {
-            FileInfo fileInfo = GetFileInfo();
+            get
+            {
+                try
+                {
+                    FileInfo file = base.File;
+                    _logger.LogTrace("{fileName} was located in {directoryName}", file.Name, file.DirectoryName);
+                    return file;
+                }
+                catch (ProcessServiceException exception)
+                {
+                    throw new YouTubeDLServiceException(exception.Message, exception);
+                }
+            }
+        }
+
+
+        public override ProcessStartInfo GetInfo(IEnumerable<StringValues> args)
+        {
+            FileInfo fileInfo = File;
             return new()
             {
                 FileName = fileInfo.Name,
@@ -116,11 +116,11 @@ namespace Bot.Services
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
-                UseShellExecute = false,
+                UseShellExecute = false
             };
         }
 
-        public Process Execute(ProcessStartInfo info)
+        public override Process Execute(ProcessStartInfo info)
         {
             if (Process.Start(info) is not Process process)
                 throw new YouTubeDLServiceException($"{nameof(Process)} {info.FileName} failed to start.");
@@ -143,7 +143,7 @@ namespace Bot.Services
         }
     }
 
-    public partial class YouTubeDLService : BackgroundService
+    public partial class YouTubeDLService
     {
         protected override Task ExecuteAsync(CancellationToken cancellationToken) => Task.Delay(-1, cancellationToken);
     }
