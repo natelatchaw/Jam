@@ -1,9 +1,12 @@
-﻿using Bot.Services;
+﻿using Bot.Interfaces;
+using Bot.Models;
+using Bot.Services;
 using Discord.Commands;
 using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using System;
 
 namespace Bot
 {
@@ -21,6 +24,10 @@ namespace Bot
             services.AddDiscordService(_configuration.GetSection("Options"));
             services.AddCommandHandler(_configuration.GetSection("CommandHandler"));
             services.AddRateLimiter(_configuration.GetSection("RateLimiter"));
+
+            services.AddSingleton<AudioQueue>();
+            services.AddSingleton<IAudioEnqueuable>((IServiceProvider provider) => provider.GetRequiredService<AudioQueue>());
+            services.AddSingleton<IAudioDequeuable>((IServiceProvider provider) => provider.GetRequiredService<AudioQueue>());
 
             services.AddSingleton<AudioService>();
             services.AddFFmpegService(_configuration.GetSection("ffmpeg"));

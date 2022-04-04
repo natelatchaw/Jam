@@ -1,4 +1,5 @@
 ﻿using Bot.Extensions;
+using Bot.Interfaces;
 using Bot.Models;
 using Bot.Services;
 using Discord;
@@ -23,6 +24,7 @@ namespace Bot.Modules
         private readonly AudioService _audioService;
         private readonly YouTubeDLService _youtubeService;
         private readonly FFmpegService _ffmpegService;
+        private readonly IAudioEnqueuable _queue;
 
         private IAudioClient? Client { get; set; }
 
@@ -30,52 +32,88 @@ namespace Bot.Modules
             ILogger<AudioModule> logger,
             AudioService audioService,
             YouTubeDLService youtubeService,
-            FFmpegService ffmpegService
+            FFmpegService ffmpegService,
+            IAudioEnqueuable queue
         ) : base()
         {
             _logger = logger;
             _audioService = audioService;
             _youtubeService = youtubeService;
             _ffmpegService = ffmpegService;
+            _queue = queue;
         }
 
         [Command("play", RunMode = RunMode.Async)]
-        public Task Play([Remainder] String query) => Task.Run(async () =>
+        public Task PlayAsync() => Task.Run(async () =>
         {
             try
             {
                 IVoiceChannel voiceChannel = Context.GetVoiceChannel();
 
-                if (await DownloadMetadataAsync(query) is Metadata metadata)
-                {
-                    Int32 descriptionLength = 150;
-                    IUser author = Context.Message.Author;
-                    EmbedAuthorBuilder embedAuthorBuilder = author
-                        .AsEmbedAuthorBuilder();
-                    EmbedBuilder embedBuilder = metadata
-                        .AsEmbedBuilder(descriptionLength)
-                        .WithAuthor(author)
-                        .WithColor(Color.Red);
-                    await Context.Channel.SendMessageAsync(embed: embedBuilder.Build());
+                await _audioService.JoinAsync(voiceChannel);
 
-                    if (Context.Client is DiscordSocketClient client)
-                        await client.SetActivityAsync(metadata.AsActivity(descriptionLength));
+                await _audioService.PlayAsync(Context.GetVoiceChannel()).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException exception)
+            {
+                _logger.LogWarning(exception, $"Tasks were cancelled. This is expected behavior.");
+                return;
+            }
+            catch (CommandContextException exception)
+            {
+                _logger.LogError(exception, "{message}", exception.Message);
+                await Context.Channel.SendMessageAsync("Could not determine the voice channel to use.");
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "{message}", exception.Message);
+                _logger.LogError(exception, "{message}", exception.StackTrace);
+                await Context.Channel.SendMessageAsync(exception.Message);
+            }
+        });
+
+        [Command("stop")]
+        public Task StopAsync() => Task.Run(async () =>
+        {
+            try
+            {
+                IVoiceChannel voiceChannel = Context.GetVoiceChannel();
+
+                await _audioService.StopAsync(voiceChannel);
+            }
+            catch (CommandContextException exception)
+            {
+                _logger.LogError(exception, "{message}", exception.Message);
+                await Context.Channel.SendMessageAsync("Could not determine the voice channel to use.");
+            }
+            catch (OperationCanceledException exception)
+            {
+                _logger.LogWarning(exception, $"Tasks were cancelled. This is expected behavior.");
+                return;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "{message}", exception.Message);
+                _logger.LogError(exception, "{message}", exception.StackTrace);
+                await Context.Channel.SendMessageAsync(exception.Message);
+            }
+        });
+
+        [Command("queue", RunMode = RunMode.Async)]
+        public Task QueueAsync([Remainder] String query) => Task.Run(async () =>
+        {
+            try
+            {
+                if (await DownloadMetadataAsync(query) is not Metadata metadata)
+                {
+                    _logger.LogWarning("Could not obtain metadata for query '{query}'", query);
+                    await Context.Channel.SendMessageAsync($"No results found for `{query}`");
+                    return;
                 }
 
-                _ = await _audioService.JoinAsync(voiceChannel);
+                await UpdateStatus(metadata);
 
-                try
-                {
-                    await Context.Message.DeleteAsync(new() { Timeout = 3 });
-                }
-                catch (HttpException exception)
-                {
-                    _logger.LogWarning("Failed to remove queue message. Are permissions enabled?");
-                    _logger.LogError(exception, "{message}", exception.Message);
-                }
-
-                Stream stream = await DownloadAudioAsync(query);
-                await Task.Run(async () => await _audioService.StreamAsync(voiceChannel, stream));
+                await _queue.EnqueueAsync(Context.Guild.Id, metadata);
             }
             catch (CommandContextException exception)
             {
@@ -106,7 +144,7 @@ namespace Bot.Modules
             IGuild guild = Context.Guild;
 
             SlashCommandBuilder builder = new();
-            if (typeof(AudioModule).GetMethod(nameof(Play)) is not MethodBase method) return;
+            if (typeof(AudioModule).GetMethod(nameof(QueueAsync)) is not MethodBase method) return;
             if (method.GetCustomAttribute<CommandAttribute>() is not CommandAttribute attribute) return;
             String name = attribute.Text.ToLower();
             _logger.LogInformation(name);
@@ -153,34 +191,26 @@ namespace Bot.Modules
             return metadata;
         }
 
-        private async Task<Stream> DownloadAudioAsync(String query)
+        private async Task UpdateStatus(Metadata metadata, Int32 descriptionLength = 150)
         {
-            /// Spawn youtube-dl
-            _logger.LogTrace("Spawning YouTube-DL process...");
-            List<StringValues> youtubeDLOptions = GetDownloadArgs(query);
-            ProcessStartInfo youtubeDLInfo = _youtubeService.GetInfo(youtubeDLOptions);
-            Process youtubeDL = _youtubeService.Execute(youtubeDLInfo);
-            _logger.LogDebug("{filename} {arguments}", youtubeDL.StartInfo.FileName, youtubeDL.StartInfo.Arguments);
+            IUser author = Context.Message.Author;
 
-            /// Spawn ffmpeg
-            _logger.LogTrace("Spawning FFmpeg process...");
-            List<StringValues> ffmpegOptions = GetMultiplexArgs();
-            ProcessStartInfo ffmpegInfo = _ffmpegService.GetInfo(ffmpegOptions);
-            Process ffmpeg = _ffmpegService.Execute(ffmpegInfo);
-            _logger.LogDebug("{directory}> {filename} {arguments}", ffmpegInfo.WorkingDirectory, ffmpeg.StartInfo.FileName, ffmpeg.StartInfo.Arguments);
+            EmbedBuilder embedBuilder = metadata
+                .AsEmbedBuilder(descriptionLength)
+                .WithAuthor(author)
+                .WithColor(Color.Red);
 
-            /// Pipe audio
-            _logger.LogDebug("Piping youtube-dl output to ffmpeg...");
-            Stream audio = await youtubeDL.PipeAsync(ffmpeg);
-            if (youtubeDL.HasExited is false) youtubeDL.Kill();
-            if (ffmpeg.HasExited is false) ffmpeg.Kill();
-            _logger.LogDebug("Received {length} bytes from ffmpeg.", audio.Length);
+            if (Context.Channel is ITextChannel channel)
+                await channel.SendMessageAsync(embed: embedBuilder.Build());
+        }
 
-            /// Rewind audio
-            audio.Seek(0, SeekOrigin.Begin);
+        private async Task UpdateActivity(Metadata metadata, Int32 descriptionLength = 150)
+        {
+            IActivity activity = metadata
+                .AsActivity(descriptionLength);
 
-            /// Return
-            return audio;
+            if (Context.Client is DiscordSocketClient client)
+                await client.SetActivityAsync(activity);
         }
     }
 
@@ -191,26 +221,6 @@ namespace Bot.Modules
             new(new[] { $"ytsearch:\"{query}\"" }),
             new(new[] { "--dump-json" }),
             new(new[] { "--output", "-" }),
-        };
-
-        private static List<StringValues> GetDownloadArgs(String query) => new()
-        {
-            new(new[] { $"ytsearch:\"{query}\"" }),
-            new(new[] { "--output", "-" }),
-        };
-
-        private static List<StringValues> GetMultiplexArgs() => new()
-        {
-            // INPUT PARAMETERS
-            new(new[] { "-hide_banner" }),
-            new(new[] { "-loglevel verbose" }),
-            new(new[] { "-i", "pipe:0" }),
-
-            // OUTPUT PARAMETERS
-            new(new[] { "-ac", "2" }),
-            new(new[] { "-f", "s16le" }),
-            new(new[] { "-ar", "48000" }),
-            new(new[] { "pipe:1" }),
         };
     }
 

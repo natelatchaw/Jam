@@ -1,4 +1,5 @@
-﻿using Bot.Models;
+﻿using Bot.Interfaces;
+using Bot.Models;
 using Discord;
 using Discord.Audio;
 using Microsoft.Extensions.Hosting;
@@ -17,11 +18,19 @@ namespace Bot.Services
         /// </summary>
         private readonly ConcurrentDictionary<UInt64, IClientConnection> Clients;
 
+        /// <summary>
+        /// 
+        /// </summary>
+        private readonly IAudioDequeuable _queue;
 
-        public AudioService()
+
+        public AudioService(
+            IAudioDequeuable queue
+        )
         {
             // Initialize the audio client mapping dictionary
             Clients = new();
+            _queue = queue;
         }
 
         /// <summary>
@@ -102,6 +111,46 @@ namespace Bot.Services
             }
         }
 
+        public async Task PlayAsync(IVoiceChannel voiceChannel, CancellationToken? cancellationToken = default)
+        {
+            // Use None if no cancellation token was provided
+            CancellationToken token = cancellationToken ?? CancellationToken.None;
+
+            if (Clients.TryGetValue(voiceChannel.Guild.Id, out IClientConnection? connection) is false)
+                throw new AudioServiceException($"");
+
+            if (connection.VoiceChannel.Id.Equals(voiceChannel.Id) is false)
+                throw new AudioServiceException($"");
+
+            // Link the internal and external tokens
+            using CancellationTokenSource linkedTokenSource = CancellationTokenSource.CreateLinkedTokenSource(connection.Source.Token, token);
+
+            while (linkedTokenSource.Token.IsCancellationRequested is false)
+            {
+                if (await _queue.DequeueAsync(voiceChannel.Guild.Id) is not Stream stream) break;
+
+                stream.Seek(0, SeekOrigin.Begin);
+
+                await StreamAsync(voiceChannel, stream, AudioApplication.Music, linkedTokenSource.Token);
+            }
+        }
+
+        public Task StopAsync(IVoiceChannel voiceChannel)
+        {
+            if (Clients.TryGetValue(voiceChannel.Guild.Id, out IClientConnection? connection) is false)
+                throw new AudioServiceException($"No {nameof(IClientConnection)} exists for {nameof(voiceChannel.Guild)} {voiceChannel.Guild.Id}");
+
+            if (connection.VoiceChannel.Id.Equals(voiceChannel.Id) is false)
+                throw new AudioServiceException($"The {nameof(IClientConnection)}'s {nameof(connection.VoiceChannel)} {nameof(connection.VoiceChannel.Id)} does not match the provided {nameof(connection.VoiceChannel)}'s {nameof(connection.VoiceChannel.Id)}");
+            
+            // Trigger cancellation
+            connection.Source.Cancel();
+
+            connection.Source = new CancellationTokenSource();
+
+            return Task.CompletedTask;
+        }
+
         /// <summary>
         /// Streams a <see cref="Stream"/> object to the provided <see cref="IVoiceChannel"/>.
         /// </summary>
@@ -130,7 +179,7 @@ namespace Bot.Services
         /// The provided <see cref="Stream"/>'s position is not altered before streaming.
         /// Ensure that <see cref="Stream.Position"/> has been properly adjusted.
         /// </remarks>
-        public async Task StreamAsync(IVoiceChannel voiceChannel, Stream stream, AudioApplication application = AudioApplication.Mixed, CancellationToken? cancellationToken = default)
+        private async Task StreamAsync(IVoiceChannel voiceChannel, Stream stream, AudioApplication application = AudioApplication.Mixed, CancellationToken? cancellationToken = default)
         {
             // Use None if no cancellation token was provided
             CancellationToken token = cancellationToken ?? CancellationToken.None;
